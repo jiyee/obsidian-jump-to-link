@@ -1,4 +1,4 @@
-import {App, MarkdownView, Plugin, PluginSettingTab, Setting, View} from 'obsidian';
+import {App, MarkdownView, Plugin, PluginSettingTab, Setting, View, editorLivePreviewField} from 'obsidian';
 import {Editor} from 'codemirror';
 import {EditorSelection} from "@codemirror/state";
 import {EditorView, ViewPlugin} from "@codemirror/view";
@@ -24,7 +24,6 @@ export default class JumpToLink extends Plugin {
     isLinkHintActive: boolean = false;
     settings: Settings;
     prefixInfo: { prefix: string, shiftKey: boolean } | undefined = undefined;
-    //markPlugin: MarkPlugin
     markViewPlugin: ViewPlugin<any>
     cmEditor: Editor | EditorView
     currentView: View
@@ -136,10 +135,27 @@ export default class JumpToLink extends Plugin {
                 break;
             case VIEW_MODE.SOURCE:
                 const cm6Editor = this.cmEditor as EditorView;
-                const livePreviewLinks = new CM6LinkProcessor(cm6Editor, letters).init();
-                cm6Editor.plugin(this.markViewPlugin).setLinks(livePreviewLinks);
+                let cm6SourceLinkHints: LinkHintBase[] = new CM6LinkProcessor(cm6Editor, letters).init();
+                cm6Editor.plugin(this.markViewPlugin).setLinks(cm6SourceLinkHints);
+
+                // concat live preview links in dataview
+                if (cm6Editor.state.field(editorLivePreviewField)) {
+                    const livePreviewViewEls: HTMLElement[] = (currentView as any).contentEl.querySelectorAll('div.cm-preview-code-block');
+
+                    // FIXME
+                    let lettersLeft = letters;
+                    livePreviewViewEls.forEach((el, _i) => {
+                        const lettersUsed = cm6SourceLinkHints.map(x => x.letter.toLowerCase());
+                        lettersLeft = lettersLeft.split("").filter(function(el) {
+                            return lettersUsed.indexOf(el) < 0;
+                        }).join("");
+                        const livePreviewHints: LinkHintBase[] = new PreviewLinkProcessor(el, lettersLeft).init();
+                        cm6SourceLinkHints = cm6SourceLinkHints.concat(livePreviewHints);
+                    });
+                }
+
                 this.app.workspace.updateOptions();
-                this.handleActions(livePreviewLinks);
+                this.handleActions(cm6SourceLinkHints);
                 break;
         }
     }
