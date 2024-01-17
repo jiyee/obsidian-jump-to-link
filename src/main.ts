@@ -322,12 +322,13 @@ export default class JumpToLink extends Plugin {
             contentElement.removeEventListener('keydown', handleKeyDown, { capture: true });
         };
 
-        if (linkHints.length === 1) {
-            const heldShiftKey = this.prefixInfo?.shiftKey;
-            this.handleHotkey(heldShiftKey, linkHints[0]);
-            this.removePopovers();
-            return
-        }
+        // 只存在一个链接的情况，自动跳转
+        // if (linkHints.length === 1) {
+        //     const heldShiftKey = this.prefixInfo?.shiftKey;
+        //     this.handleHotkey(heldShiftKey, linkHints[0]);
+        //     this.removePopovers();
+        //     return
+        // }
 
         contentElement.addEventListener('click', this.removePopovers)
         contentElement.addEventListener('keydown', handleKeyDown, { capture: true });
