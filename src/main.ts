@@ -10,11 +10,13 @@ import CM6RegexProcessor from "./processors/CM6RegexProcessor";
 import LegacyRegexpProcessor from "./processors/LegacyRegexpProcessor";
 import LegacySourceLinkProcessor from "./processors/LegacySourceLinkProcessor";
 import PreviewLinkProcessor from "./processors/PreviewLinkProcessor";
+import LivePreviewLinkProcessor from './processors/LivePreviewLinkProcessor';
 
 enum VIEW_MODE {
     SOURCE,
     PREVIEW,
-    LEGACY
+    LEGACY,
+    LIVE_PREVIEW
 }
 interface CursorState {
     vimMode?: string;
@@ -85,6 +87,7 @@ export default class JumpToLink extends Plugin {
             case VIEW_MODE.LEGACY:
                 this.cmEditor = (currentView as any).sourceMode.cmEditor;
                 break;
+            case VIEW_MODE.LIVE_PREVIEW:
             case VIEW_MODE.SOURCE:
                 this.cmEditor = (<{ editor?: { cm: EditorView } }>currentView).editor.cm;
                 break;
@@ -112,6 +115,8 @@ export default class JumpToLink extends Plugin {
         } else if (isLegacy) {
             return VIEW_MODE.LEGACY;
         } else if (currentView.getState().mode === 'source') {
+            const isLivePreview = (<{ editor?: { cm: EditorView } }>currentView).editor.cm.state.field(editorLivePreviewField)
+            if(isLivePreview) return VIEW_MODE.LIVE_PREVIEW
             return VIEW_MODE.SOURCE;
         }
 
@@ -123,40 +128,35 @@ export default class JumpToLink extends Plugin {
         const { mode, currentView } = this;
 
         switch (mode) {
-            case VIEW_MODE.LEGACY:
+            case VIEW_MODE.LEGACY: {
                 const cmEditor = this.cmEditor as Editor;
                 const sourceLinkHints = new LegacySourceLinkProcessor(cmEditor, letters).init();
                 this.handleActions(sourceLinkHints);
                 break;
-            case VIEW_MODE.PREVIEW:
+            }
+            case VIEW_MODE.LIVE_PREVIEW: {
+                const cm6Editor = this.cmEditor as EditorView;
+                const previewViewEl: HTMLElement = (currentView as any).currentMode.editor.containerEl;
+                const [previewLinkHints, sourceLinkHints] = new LivePreviewLinkProcessor(previewViewEl, cm6Editor, letters).init();
+                cm6Editor.plugin(this.markViewPlugin).setLinks(sourceLinkHints);
+                this.app.workspace.updateOptions();
+                this.handleActions([...previewLinkHints, ...sourceLinkHints]);
+                break;
+            }
+            case VIEW_MODE.PREVIEW: {
                 const previewViewEl: HTMLElement = (currentView as any).previewMode.containerEl.querySelector('div.markdown-preview-view');
                 const previewLinkHints = new PreviewLinkProcessor(previewViewEl, letters).init();
                 this.handleActions(previewLinkHints);
                 break;
-            case VIEW_MODE.SOURCE:
+            }
+            case VIEW_MODE.SOURCE: {
                 const cm6Editor = this.cmEditor as EditorView;
-                let cm6SourceLinkHints: LinkHintBase[] = new CM6LinkProcessor(cm6Editor, letters).init();
-                cm6Editor.plugin(this.markViewPlugin).setLinks(cm6SourceLinkHints);
-
-                // concat live preview links in dataview
-                if (cm6Editor.state.field(editorLivePreviewField)) {
-                    const livePreviewViewEls: HTMLElement[] = (currentView as any).contentEl.querySelectorAll('div.cm-preview-code-block');
-
-                    // FIXME
-                    let lettersLeft = letters;
-                    livePreviewViewEls.forEach((el, _i) => {
-                        const lettersUsed = cm6SourceLinkHints.map(x => x.letter.toLowerCase());
-                        lettersLeft = lettersLeft.split("").filter(function(el) {
-                            return lettersUsed.indexOf(el) < 0;
-                        }).join("");
-                        const livePreviewHints: LinkHintBase[] = new PreviewLinkProcessor(el, lettersLeft).init();
-                        cm6SourceLinkHints = cm6SourceLinkHints.concat(livePreviewHints);
-                    });
-                }
-
+                const livePreviewLinks = new CM6LinkProcessor(cm6Editor, letters).init();
+                cm6Editor.plugin(this.markViewPlugin).setLinks(livePreviewLinks);
                 this.app.workspace.updateOptions();
-                this.handleActions(cm6SourceLinkHints);
+                this.handleActions(livePreviewLinks);
                 break;
+            }
         }
     }
 
@@ -269,12 +269,31 @@ export default class JumpToLink extends Plugin {
 
         currentView.removeEventListener('click', this.removePopovers)
         currentView.querySelectorAll('.jl.popover').forEach(e => e.remove());
-        currentView.querySelectorAll('#jl-modal').forEach(e => e.remove());
 
         this.prefixInfo = undefined;
-        (this.cmEditor as EditorView).plugin(this.markViewPlugin).clean();
+        if (this.mode == VIEW_MODE.SOURCE) {
+            (this.cmEditor as EditorView).plugin(this.markViewPlugin).clean();
+        }
         this.app.workspace.updateOptions();
         this.isLinkHintActive = false;
+    }
+
+    removePopoversWithoutPrefixEventKey(eventKey: string) {
+        const currentView = this.contentElement;
+
+        currentView.querySelectorAll('.jl.popover').forEach(e => {
+            if (e.innerHTML.length == 2 && e.innerHTML[0] == eventKey) {
+                e.classList.add("matched");
+                return;
+            }
+
+            e.remove();
+        });
+
+        if (this.mode == VIEW_MODE.SOURCE) {
+            (this.cmEditor as EditorView).plugin(this.markViewPlugin).filterWithEventKey(eventKey);
+        }
+        this.app.workspace.updateOptions();
     }
 
     handleActions(linkHints: LinkHintBase[]): void {
@@ -306,6 +325,8 @@ export default class JumpToLink extends Plugin {
                     event.stopPropagation();
                     event.stopImmediatePropagation();
 
+                    this.removePopoversWithoutPrefixEventKey(eventKey);
+
                     return;
                 }
             }
@@ -322,13 +343,12 @@ export default class JumpToLink extends Plugin {
             contentElement.removeEventListener('keydown', handleKeyDown, { capture: true });
         };
 
-        // 只存在一个链接的情况，自动跳转
-        // if (linkHints.length === 1) {
-        //     const heldShiftKey = this.prefixInfo?.shiftKey;
-        //     this.handleHotkey(heldShiftKey, linkHints[0]);
-        //     this.removePopovers();
-        //     return
-        // }
+        if (linkHints.length === 1 && this.settings.jumpToLinkIfOneLinkOnly) {
+            const heldShiftKey = this.prefixInfo?.shiftKey;
+            this.handleHotkey(heldShiftKey, linkHints[0]);
+            this.removePopovers();
+            return
+        }
 
         contentElement.addEventListener('click', this.removePopovers)
         contentElement.addEventListener('keydown', handleKeyDown, { capture: true });
@@ -382,22 +402,6 @@ class SettingTab extends PluginSettingTab {
 
         containerEl.createEl('h2', {text: 'Settings for Jump To Link.'});
 
-        /* Modal mode deprecated */
-        // new Setting(containerEl)
-        //     .setName('Presentation')
-        //     .setDesc('How to show links')
-        //     .addDropdown(cb => { cb
-        //         .addOptions({
-        //             "popovers": 'Popovers',
-        //             "modal": 'Modal'
-        //         })
-        //         .setValue(this.plugin.settings.mode)
-        //         .onChange((value: LinkHintMode) => {
-        //             this.plugin.settings.mode = value;
-        //             this.plugin.saveData(this.plugin.settings);
-        //         })
-        //     });
-
         new Setting(containerEl)
             .setName('Characters used for link hints')
             .setDesc('The characters placed next to each link after enter link-hint mode.')
@@ -431,6 +435,19 @@ class SettingTab extends PluginSettingTab {
                 toggle.setValue(this.plugin.settings.lightspeedCaseSensitive)
                     .onChange(async (state) => {
                     this.plugin.settings.lightspeedCaseSensitive = state;
+                    await this.plugin.saveData(this.plugin.settings);
+                });
+            });
+
+        new Setting(containerEl)
+            .setName('Jump to Link If Only One Link In Page')
+            .setDesc(
+                'If enabled, auto jump to link if there is only one link in page'
+            )
+            .addToggle((toggle) => {
+                toggle.setValue(this.plugin.settings.jumpToLinkIfOneLinkOnly)
+                    .onChange(async (state) => {
+                    this.plugin.settings.jumpToLinkIfOneLinkOnly = state;
                     await this.plugin.saveData(this.plugin.settings);
                 });
             });
